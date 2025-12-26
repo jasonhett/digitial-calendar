@@ -13,7 +13,7 @@ import {
 const DAILY_WINDOW_START = 8;
 const DAILY_WINDOW_HOURS = 12;
 const DAILY_SLOT_MINUTES = 15;
-const DAILY_SLOT_HEIGHT = 20;
+const DAILY_SLOT_HEIGHT = 24;
 const TIME_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const formatTime = (date, timeFormat) =>
@@ -75,6 +75,7 @@ export default function App() {
   const [monthOffset, setMonthOffset] = useState(0);
   const [rangeRequest, setRangeRequest] = useState(null);
   const [timeOffsetMs, setTimeOffsetMs] = useState(0);
+  const [activeEvent, setActiveEvent] = useState(null);
 
   useEffect(() => {
     const updateNow = () => {
@@ -231,6 +232,100 @@ export default function App() {
   const weatherDescription = weather?.current?.description || "";
   const weatherLocationName = weather?.location?.name || weatherLocation;
 
+  const sanitizeDescription = (value = "") => {
+    if (!value) {
+      return "";
+    }
+    let text = value.replace(/<br\s*\/?>/gi, "\n");
+    text = text.replace(/<\/p>/gi, "\n");
+    text = text.replace(/<[^>]+>/g, "");
+    text = text.replace(/&nbsp;/gi, " ");
+    text = text.replace(/&amp;/gi, "&");
+    text = text.replace(/&lt;/gi, "<");
+    text = text.replace(/&gt;/gi, ">");
+    text = text.replace(/\n{3,}/g, "\n\n");
+    return text.trim();
+  };
+
+  const getLocationLink = (value = "") => {
+    const trimmed = value.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      return null;
+    }
+    try {
+      const url = new URL(trimmed);
+      return url.protocol === "http:" || url.protocol === "https:" ? trimmed : null;
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const extractMeetingLinks = (event) => {
+    const sources = [event?.location, event?.description].filter(Boolean).join(" ");
+    const urlRegex = /https?:\/\/[^\s<]+/gi;
+    const matches = sources.match(urlRegex) || [];
+    const uniq = Array.from(new Set(matches.map((link) => link.replace(/[),.]+$/g, ""))));
+    return uniq.filter((link) => {
+      try {
+        const url = new URL(link);
+        const host = url.hostname.toLowerCase();
+        return host.includes("zoom.us") || host.includes("meet.google.com");
+      } catch (_error) {
+        return false;
+      }
+    });
+  };
+
+  const getMeetingLinkLabel = (link) => {
+    try {
+      const host = new URL(link).hostname.toLowerCase();
+      if (host.includes("zoom.us")) {
+        return "Zoom Link";
+      }
+      if (host.includes("meet.google.com")) {
+        return "Google Meeting Link";
+      }
+    } catch (_error) {
+      return "Meeting Link";
+    }
+    return "Meeting Link";
+  };
+
+  const formatEventDateRange = (event) => {
+    if (!event?.start) {
+      return "";
+    }
+    const start = new Date(event.start);
+    const end = event.end ? new Date(event.end) : null;
+    if (Number.isNaN(start.getTime())) {
+      return "";
+    }
+    const dateOptions = { weekday: "short", month: "short", day: "numeric" };
+    const startDateLabel = start.toLocaleDateString([], dateOptions);
+    if (event.allDay) {
+      if (end && !Number.isNaN(end.getTime()) && end > start) {
+        const endDate = new Date(end);
+        endDate.setDate(endDate.getDate() - 1);
+        const endDateLabel = endDate.toLocaleDateString([], dateOptions);
+        if (endDateLabel !== startDateLabel) {
+          return `${startDateLabel} - ${endDateLabel} · All day`;
+        }
+      }
+      return `${startDateLabel} · All day`;
+    }
+    const timeLabel = formatEventRange(event, timeFormat);
+    return `${startDateLabel} · ${timeLabel}`;
+  };
+
+  const meetingLinks = useMemo(
+    () => (activeEvent ? extractMeetingLinks(activeEvent) : []),
+    [activeEvent]
+  );
+  const sanitizedDescription = useMemo(
+    () => (activeEvent ? sanitizeDescription(activeEvent.description) : ""),
+    [activeEvent]
+  );
+
   const sortedEvents = useMemo(() => {
     const events = eventsCache?.events || [];
     return [...events].sort((a, b) => getEventStartMs(a) - getEventStartMs(b));
@@ -291,9 +386,7 @@ export default function App() {
           Math.ceil((clampedEnd - rangeStart) / DAILY_SLOT_MINUTES)
         );
         return {
-          id: event.id,
-          summary: event.summary,
-          calendarColor: event.calendarColor,
+          ...event,
           timeLabel: formatEventRange(event, timeFormat),
           startSlot,
           slotCount: endSlot - startSlot
@@ -611,6 +704,14 @@ export default function App() {
                       key={event.id}
                       className="display__event-card"
                       style={{ borderLeftColor: event.calendarColor }}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setActiveEvent(event)}
+                      onKeyDown={(eventKey) => {
+                        if (eventKey.key === "Enter" || eventKey.key === " ") {
+                          setActiveEvent(event);
+                        }
+                      }}
                     >
                       <div className="display__event-date">
                         <span className="display__event-weekday">{meta.weekday}</span>
@@ -644,13 +745,15 @@ export default function App() {
                 <div className="display__all-day-label">All day</div>
                 <div className="display__all-day-items">
                   {allDayEvents.map((event) => (
-                    <span
+                    <button
+                      type="button"
                       key={event.id}
                       className="display__all-day-chip"
                       style={{ borderLeftColor: event.calendarColor }}
+                      onClick={() => setActiveEvent(event)}
                     >
                       {event.summary}
-                    </span>
+                    </button>
                   ))}
                 </div>
               </div>
@@ -664,6 +767,14 @@ export default function App() {
                     height: `${event.slotCount * DAILY_SLOT_HEIGHT}px`,
                     borderLeftColor: event.calendarColor
                   }}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setActiveEvent(event)}
+                  onKeyDown={(eventKey) => {
+                    if (eventKey.key === "Enter" || eventKey.key === " ") {
+                      setActiveEvent(event);
+                    }
+                  }}
                 >
                   <span className="display__daily-event-time">{event.timeLabel}</span>
                   <span className="display__daily-event-title">{event.summary}</span>
@@ -676,6 +787,83 @@ export default function App() {
           </div>
         </div>
       </section>
+      {activeEvent ? (
+          <div className="display__modal" role="dialog" aria-modal="true">
+            <div className="display__modal-overlay" onClick={() => setActiveEvent(null)} />
+            <div className="display__modal-card">
+              <div className="display__modal-header">
+                <div>
+                  <h3 className="display__modal-title">{activeEvent.summary}</h3>
+                  <p className="display__modal-subtitle">
+                    {formatEventDateRange(activeEvent)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="display__modal-close"
+                  onClick={() => setActiveEvent(null)}
+                  aria-label="Close event details"
+                >
+                  X
+                </button>
+              </div>
+              <div className="display__modal-meta">
+                <span
+                  className="display__modal-color"
+                  style={{ backgroundColor: activeEvent.calendarColor }}
+                />
+                <span className="display__modal-label">
+                  {activeEvent.calendarLabel || "Calendar"}
+                </span>
+              </div>
+              {activeEvent.location ? (
+                <div className="display__modal-block">
+                  <span className="display__modal-heading">Location</span>
+                  <p className="display__modal-text display__modal-text--wrap">
+                    {getLocationLink(activeEvent.location) ? (
+                      <a
+                        href={getLocationLink(activeEvent.location)}
+                        className="display__modal-link"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {getMeetingLinkLabel(getLocationLink(activeEvent.location))}
+                      </a>
+                    ) : (
+                      activeEvent.location
+                    )}
+                  </p>
+                </div>
+              ) : null}
+              {meetingLinks.length ? (
+                <div className="display__modal-block">
+                  <span className="display__modal-heading">Meeting links</span>
+                  <div className="display__modal-links">
+                    {meetingLinks.map((link) => (
+                      <a
+                        key={link}
+                        href={link}
+                        className="display__modal-link"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {getMeetingLinkLabel(link)}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {sanitizedDescription ? (
+                <div className="display__modal-block">
+                  <span className="display__modal-heading">Notes</span>
+                  <p className="display__modal-text display__modal-text--wrap">
+                    {sanitizedDescription}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          </div>
+      ) : null}
     </main>
   );
 }

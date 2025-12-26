@@ -23,21 +23,23 @@ export const eventOccursOnDateKey = (event, dateKey) => {
   if (!event?.start || !dateKey) {
     return false;
   }
-  if (!event.allDay) {
-    return getEventDateKey(event) === dateKey;
-  }
-  const startKey = typeof event.start === "string" ? event.start.slice(0, 10) : null;
-  if (!startKey) {
+  const dayStart = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(dayStart.getTime())) {
     return false;
   }
-  if (!event.end || typeof event.end !== "string") {
-    return startKey === dateKey;
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+
+  const startMs = getEventStartMs(event);
+  if (!startMs) {
+    return false;
   }
-  const endKey = event.end.slice(0, 10);
-  if (!endKey || endKey <= startKey) {
-    return startKey === dateKey;
+  let endMs = getEventEndMs(event);
+  if (!endMs || endMs <= startMs) {
+    endMs = startMs + 60 * 60 * 1000;
   }
-  return dateKey >= startKey && dateKey < endKey;
+
+  return startMs < dayEnd.getTime() && endMs > dayStart.getTime();
 };
 
 export const getEventStartMs = (event) => {

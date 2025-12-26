@@ -22,6 +22,16 @@ describe("eventOccursOnDateKey", () => {
     expect(eventOccursOnDateKey(event, "2025-12-24")).toBe(true);
     expect(eventOccursOnDateKey(event, "2025-12-25")).toBe(false);
   });
+
+  it("includes multi-day timed events on each day they overlap", () => {
+    const event = {
+      allDay: false,
+      start: "2025-12-24T23:00:00",
+      end: "2025-12-25T01:00:00"
+    };
+    expect(eventOccursOnDateKey(event, "2025-12-24")).toBe(true);
+    expect(eventOccursOnDateKey(event, "2025-12-25")).toBe(true);
+  });
 });
 
 describe("getUpcomingDateParts", () => {
