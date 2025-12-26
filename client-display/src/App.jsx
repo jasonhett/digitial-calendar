@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+const DAILY_WINDOW_START = 8;
+const DAILY_WINDOW_HOURS = 12;
+const DAILY_SLOT_MINUTES = 15;
+const DAILY_SLOT_HEIGHT = 20;
+
 const formatTime = (date, timeFormat) =>
   date.toLocaleTimeString([], {
     hour: "2-digit",
@@ -41,6 +46,27 @@ const getEventDateKey = (event) => {
   return toLocalDateKey(start);
 };
 
+const eventOccursOnDateKey = (event, dateKey) => {
+  if (!event?.start || !dateKey) {
+    return false;
+  }
+  if (!event.allDay) {
+    return getEventDateKey(event) === dateKey;
+  }
+  const startKey = typeof event.start === "string" ? event.start.slice(0, 10) : null;
+  if (!startKey) {
+    return false;
+  }
+  if (!event.end || typeof event.end !== "string") {
+    return startKey === dateKey;
+  }
+  const endKey = event.end.slice(0, 10);
+  if (!endKey || endKey <= startKey) {
+    return startKey === dateKey;
+  }
+  return dateKey >= startKey && dateKey < endKey;
+};
+
 const getEventStartMs = (event) => {
   if (!event?.start) {
     return 0;
@@ -66,6 +92,36 @@ const formatEventTime = (event, timeFormat) => {
     hour12: timeFormat !== "24h"
   });
 };
+
+const formatEventRange = (event, timeFormat) => {
+  if (event.allDay) {
+    return "All day";
+  }
+  const start = new Date(event.start);
+  const end = event.end ? new Date(event.end) : null;
+  if (Number.isNaN(start.getTime())) {
+    return "";
+  }
+  const options = { hour: "2-digit", minute: "2-digit", hour12: timeFormat !== "24h" };
+  const startLabel = start.toLocaleTimeString([], options);
+  if (!end || Number.isNaN(end.getTime())) {
+    return startLabel;
+  }
+  return `${startLabel} - ${end.toLocaleTimeString([], options)}`;
+};
+
+const getEventEndMs = (event) => {
+  if (!event?.end) {
+    return 0;
+  }
+  if (event.allDay && typeof event.end === "string") {
+    return new Date(`${event.end}T00:00:00`).getTime();
+  }
+  const end = new Date(event.end);
+  return Number.isNaN(end.getTime()) ? 0 : end.getTime();
+};
+
+const getMinutesIntoDay = (date) => date.getHours() * 60 + date.getMinutes();
 
 const viewLabels = {
   month: "Monthly View",
@@ -205,13 +261,6 @@ export default function App() {
   const weatherDescription = weather?.current?.description || "";
   const weatherLocationName = weather?.location?.name || weatherLocation;
 
-  const headerSubtitle = useMemo(() => {
-    if (error) {
-      return error;
-    }
-    return `Default view: ${viewLabels[defaultView]}`;
-  }, [defaultView, error]);
-
   const sortedEvents = useMemo(() => {
     const events = eventsCache?.events || [];
     return [...events].sort((a, b) => getEventStartMs(a) - getEventStartMs(b));
@@ -220,9 +269,65 @@ export default function App() {
   const todayKey = useMemo(() => toLocalDateKey(now), [now]);
   const selectedKey = useMemo(() => toLocalDateKey(selectedDate), [selectedDate]);
   const selectedEvents = useMemo(
-    () => sortedEvents.filter((event) => getEventDateKey(event) === selectedKey),
+    () => sortedEvents.filter((event) => eventOccursOnDateKey(event, selectedKey)),
     [sortedEvents, selectedKey]
   );
+
+  const allDayEvents = useMemo(
+    () => selectedEvents.filter((event) => event.allDay),
+    [selectedEvents]
+  );
+
+  const dailyWindow = useMemo(() => {
+    const startHour = DAILY_WINDOW_START;
+    const endHour = startHour + DAILY_WINDOW_HOURS;
+    const slots = (DAILY_WINDOW_HOURS * 60) / DAILY_SLOT_MINUTES;
+    const hours = [];
+    for (let hour = startHour; hour < endHour; hour += 1) {
+      hours.push(hour);
+    }
+    return { startHour, endHour, slots, hours };
+  }, []);
+
+  const timedEvents = useMemo(() => {
+    const rangeStart = dailyWindow.startHour * 60;
+    const rangeEnd = dailyWindow.endHour * 60;
+
+    const events = selectedEvents
+      .filter((event) => !event.allDay)
+      .map((event) => {
+        const startMs = getEventStartMs(event);
+        let endMs = getEventEndMs(event);
+        if (!endMs || endMs <= startMs) {
+          endMs = startMs + 60 * 60 * 1000;
+        }
+        const startDate = new Date(startMs);
+        const endDate = new Date(endMs);
+        const startMinutes = getMinutesIntoDay(startDate);
+        const endMinutes = getMinutesIntoDay(endDate);
+        if (endMinutes <= rangeStart || startMinutes >= rangeEnd) {
+          return null;
+        }
+        const clampedStart = Math.max(startMinutes, rangeStart);
+        const clampedEnd = Math.min(endMinutes, rangeEnd);
+        const startSlot = Math.floor((clampedStart - rangeStart) / DAILY_SLOT_MINUTES);
+        const endSlot = Math.max(
+          startSlot + 1,
+          Math.ceil((clampedEnd - rangeStart) / DAILY_SLOT_MINUTES)
+        );
+        return {
+          id: event.id,
+          summary: event.summary,
+          calendarColor: event.calendarColor,
+          timeLabel: formatEventRange(event, timeFormat),
+          startSlot,
+          slotCount: endSlot - startSlot
+        };
+      })
+      .filter(Boolean);
+
+    return events.sort((a, b) => a.startSlot - b.startSlot);
+  }, [selectedEvents, timeFormat, dailyWindow]);
 
   useEffect(() => {
     if (!dailyResetMinutes || dailyResetMinutes <= 0) {
@@ -244,6 +349,27 @@ export default function App() {
     return sortedEvents.filter((event) => getEventStartMs(event) >= nowMs).slice(0, 6);
   }, [sortedEvents, now]);
 
+  const getUpcomingDateParts = (event) => {
+    if (!event?.start) {
+      return { weekday: "", day: "", month: "", timeLabel: "" };
+    }
+    let date = null;
+    if (event.allDay && typeof event.start === "string") {
+      date = new Date(`${event.start}T00:00:00`);
+    } else {
+      date = new Date(event.start);
+    }
+    if (!date || Number.isNaN(date.getTime())) {
+      return { weekday: "", day: "", month: "", timeLabel: "" };
+    }
+    return {
+      weekday: date.toLocaleDateString([], { weekday: "short" }),
+      day: date.toLocaleDateString([], { day: "numeric" }),
+      month: date.toLocaleDateString([], { month: "short" }),
+      timeLabel: event.allDay ? "All day" : formatEventTime(event, timeFormat)
+    };
+  };
+
   const monthCells = useMemo(() => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -256,7 +382,7 @@ export default function App() {
     for (let day = 1; day <= daysInMonth; day += 1) {
       const date = new Date(now.getFullYear(), now.getMonth(), day);
       const key = toLocalDateKey(date);
-      const events = sortedEvents.filter((event) => getEventDateKey(event) === key);
+      const events = sortedEvents.filter((event) => eventOccursOnDateKey(event, key));
       cells.push({ key, day, date, events });
     }
     return cells;
@@ -268,7 +394,7 @@ export default function App() {
         <div>
           <p className="display__date">{formatDate(now)}</p>
           <p className="display__time">{formatTime(now, timeFormat)}</p>
-          <p className="display__subtle">{headerSubtitle}</p>
+          {error ? <p className="display__subtle">{error}</p> : null}
         </div>
         <div className="display__weather">
           {weatherSummary ? (
@@ -285,8 +411,10 @@ export default function App() {
       </header>
       <section className="display__content">
         <div className="display__panel">
-          <div className="display__panel-header">
-            <h2>{viewLabels[view]}</h2>
+          <div className="display__month-header">
+            <div className="display__month-label">
+              {view === "month" ? formatMonthLabel(now) : "Upcoming"}
+            </div>
             <div className="display__toggles">
               {Object.keys(viewLabels).map((key) => (
                 <button
@@ -303,73 +431,95 @@ export default function App() {
             </div>
           </div>
           {view === "month" ? (
-            <div>
-              <div className="display__month-label">{formatMonthLabel(now)}</div>
+            <div className="display__month">
               <div className="display__calendar">
-                {dayLabels.map((label) => (
-                  <div key={label} className="display__day-label">
-                    {label}
-                  </div>
-                ))}
-                {monthCells.map((cell) => {
-                  if (!cell.day) {
-                    return <div key={cell.key} className="display__day display__day--empty" />;
-                  }
-                  const isToday = toLocalDateKey(cell.date) === todayKey;
-                  const isSelected = toLocalDateKey(cell.date) === selectedKey;
-                  const events = cell.events || [];
-                  return (
-                    <div
-                      key={cell.key}
-                      className={
-                        isToday
-                          ? "display__day display__day--today"
-                          : isSelected
-                            ? "display__day display__day--selected"
-                            : "display__day"
-                      }
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedDate(cell.date)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          setSelectedDate(cell.date);
-                        }
-                      }}
-                    >
-                      <div className="display__day-number">{cell.day}</div>
-                      {events.slice(0, 2).map((event) => (
-                        <div key={event.id} className="display__event-chip">
-                          <span
-                            className="display__event-dot"
-                            style={{ backgroundColor: event.calendarColor }}
-                          />
-                          <span className="display__event-chip-text">
-                            {formatEventTime(event, timeFormat)} {event.summary}
-                          </span>
-                        </div>
-                      ))}
-                      {events.length > 2 ? (
-                        <div className="display__event-more">+{events.length - 2} more</div>
-                      ) : null}
+                <div className="display__calendar-header">
+                  {dayLabels.map((label) => (
+                    <div key={label} className="display__day-label">
+                      {label}
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+                <div className="display__calendar-grid">
+                  {monthCells.map((cell) => {
+                    if (!cell.day) {
+                      return <div key={cell.key} className="display__day display__day--empty" />;
+                    }
+                    const isToday = toLocalDateKey(cell.date) === todayKey;
+                    const isSelected = toLocalDateKey(cell.date) === selectedKey;
+                    const events = cell.events || [];
+                    return (
+                      <div
+                        key={cell.key}
+                        className={
+                          isToday
+                            ? "display__day display__day--today"
+                            : isSelected
+                              ? "display__day display__day--selected"
+                              : "display__day"
+                        }
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setSelectedDate(cell.date)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            setSelectedDate(cell.date);
+                          }
+                        }}
+                      >
+                        <div className="display__day-number">{cell.day}</div>
+                        <div className="display__day-events">
+                          {events.slice(0, 3).map((event) => (
+                            <div key={event.id} className="display__event-chip">
+                              <span
+                                className="display__event-dot"
+                                style={{ backgroundColor: event.calendarColor }}
+                              />
+                              <span className="display__event-chip-text">
+                                {formatEventTime(event, timeFormat)} {event.summary}
+                              </span>
+                            </div>
+                          ))}
+                          {events.length > 3 ? (
+                            <div className="display__event-more">+{events.length - 3} more</div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           ) : null}
           {view === "activity" ? (
-            <div className="display__list">
-              <h3 className="display__section-title">Upcoming</h3>
+            <div className="display__list display__list--scrollable">
               {upcomingEvents.length ? (
-                upcomingEvents.map((event) => (
-                  <div key={event.id} className="display__event-row">
-                    <span className="display__event-time">
-                      {formatEventTime(event, timeFormat)}
-                    </span>
-                    <span className="display__event-title">{event.summary}</span>
-                  </div>
-                ))
+                upcomingEvents.map((event) => {
+                  const meta = getUpcomingDateParts(event);
+                  return (
+                    <div
+                      key={event.id}
+                      className="display__event-card"
+                      style={{ borderLeftColor: event.calendarColor }}
+                    >
+                      <div className="display__event-date">
+                        <span className="display__event-weekday">{meta.weekday}</span>
+                        <span className="display__event-day">{meta.day}</span>
+                        <span className="display__event-month">{meta.month}</span>
+                      </div>
+                      <div className="display__event-details">
+                        <div className="display__event-title-row">
+                          <span className="display__event-title">{event.summary}</span>
+                          <span
+                            className="display__event-dot"
+                            style={{ backgroundColor: event.calendarColor }}
+                          />
+                        </div>
+                        <span className="display__event-time">{meta.timeLabel}</span>
+                      </div>
+                    </div>
+                  );
+                })
               ) : (
                 <p className="display__muted">No upcoming events.</p>
               )}
@@ -378,21 +528,44 @@ export default function App() {
         </div>
         <div className="display__panel">
           <h2>{formatDate(selectedDate)}</h2>
-          {selectedEvents.length ? (
-            selectedEvents.map((event) => (
-              <div key={event.id} className="display__event-row">
-                <span className="display__event-time">{formatEventTime(event, timeFormat)}</span>
-                <span className="display__event-title">{event.summary}</span>
+          <div className="display__day-view">
+            {allDayEvents.length ? (
+              <div className="display__all-day">
+                <div className="display__all-day-label">All day</div>
+                <div className="display__all-day-items">
+                  {allDayEvents.map((event) => (
+                    <span
+                      key={event.id}
+                      className="display__all-day-chip"
+                      style={{ borderLeftColor: event.calendarColor }}
+                    >
+                      {event.summary}
+                    </span>
+                  ))}
+                </div>
               </div>
-            ))
-          ) : (
-            <p className="display__muted">No events scheduled for this day.</p>
-          )}
+            ) : null}
+            <div className="display__daily-stack">
+              {timedEvents.map((event) => (
+                <div
+                  key={event.id}
+                  className="display__daily-event"
+                  style={{
+                    height: `${event.slotCount * DAILY_SLOT_HEIGHT}px`,
+                    borderLeftColor: event.calendarColor
+                  }}
+                >
+                  <span className="display__daily-event-time">{event.timeLabel}</span>
+                  <span className="display__daily-event-title">{event.summary}</span>
+                </div>
+              ))}
+            </div>
+            {!allDayEvents.length && !timedEvents.length ? (
+              <p className="display__muted">No events scheduled for this day.</p>
+            ) : null}
+          </div>
         </div>
       </section>
-      <footer className="display__footer">
-        <p>Notes and reminders will appear here.</p>
-      </footer>
     </main>
   );
 }
